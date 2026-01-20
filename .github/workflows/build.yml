@@ -1,0 +1,45 @@
+name: Build ELF Linux ARM64 (R36S)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Install .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Install NativeAOT deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            clang \
+            zlib1g-dev
+
+      - name: Publish NativeAOT (ELF ARM64)
+        run: |
+          dotnet publish \
+            -c Release \
+            -r linux-arm64 \
+            --self-contained true \
+            /p:PublishAot=true
+
+      - name: List output
+        run: |
+          ls -lah bin/Release/net8.0/linux-arm64/publish
+
+      - name: Upload ELF + .so
+        uses: actions/upload-artifact@v4
+        with:
+          name: R36S-build
+          path: |
+            bin/Release/net8.0/linux-arm64/publish/*
+            libraylib.so
