@@ -22,7 +22,9 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             clang \
+            lld \
             zlib1g-dev
+
 
       - name: Publish NativeAOT (ELF ARM64)
         run: |
