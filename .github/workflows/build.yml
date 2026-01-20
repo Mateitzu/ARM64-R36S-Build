@@ -1,88 +1,44 @@
-name: Build R36S for linux-arm64 (AOT/native)
+name: Build R36S ARM64 (glibc compatible)
 
 on:
   workflow_dispatch:
 
 jobs:
-  build-native-arm64:
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
+  build:
+    runs-on: ubuntu-20.04
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Set up QEMU (multi-arch emulation)
+      - name: Enable ARM64
         uses: docker/setup-qemu-action@v3
 
-      - name: Set up Docker Buildx (optional)
-        uses: docker/setup-buildx-action@v3
-
-      - name: Build inside ARM64 .NET SDK container (install zlib + toolchain)
+      - name: Build in ARM64 Ubuntu 20.04
         run: |
           docker run --rm --platform linux/arm64 \
-            -v "${{ github.workspace }}:/work" -w /work \
-            mcr.microsoft.com/dotnet/sdk:8.0 /bin/bash -lc "\
-              set -euo pipefail; \
-              echo '=== container info ==='; uname -a; arch; dotnet --info || true; \
-              export DEBIAN_FRONTEND=noninteractive; \
-              apt-get update -y; \
-              apt-get install -y --no-install-recommends \
-                clang lld binutils-aarch64-linux-gnu build-essential pkg-config wget ca-certificates \
-                zlib1g-dev libssl-dev libunwind-dev; \
-              echo '=== tool versions ==='; clang --version || true; aarch64-linux-gnu-ld --version || true; ld.bfd --version || true; \
-              echo '=== dotnet restore ==='; \
-              dotnet restore || (echo 'dotnet restore failed' >&2; false); \
-              echo '=== dotnet publish (AOT) ==='; \
-              dotnet publish -c Release -r linux-arm64 --self-contained true /p:PublishAot=true /p:InvariantGlobalization=true -v minimal; \
-              echo '=== list outputs ==='; \
-              ls -lah bin/Release/net8.0/linux-arm64 || true; \
-              find bin/Release/net8.0/linux-arm64 -maxdepth 6 -type f -print || true; \
-              echo BUILD_COMPLETE > build-arm64-complete.txt; \
+            -v "$PWD:/work" -w /work \
+            ubuntu:20.04 /bin/bash -lc "
+              set -e
+              apt update
+              apt install -y \
+                build-essential clang cmake git \
+                libgl1-mesa-dev libegl1-mesa-dev \
+                libdrm-dev libgbm-dev libudev-dev \
+                zlib1g-dev libx11-dev
+
+              # dotnet
+              curl -fsSL https://dot.net/v1/dotnet-install.sh | bash
+              export PATH=\$HOME/.dotnet:\$PATH
+
+              dotnet publish -c Release \
+                -r linux-arm64 \
+                --self-contained true \
+                /p:PublishAot=true \
+                /p:InvariantGlobalization=true
             "
 
-      - name: Show produced files (host)
-        run: |
-          echo "=== bin tree ==="
-          ls -Rlah bin/Release/net8.0/linux-arm64 || true
-          echo "=== workspace top ==="
-          ls -lah | sed -n '1,200p' || true
-
-      - name: Fail if no native artifacts found (helpful debug)
-        run: |
-          PATTERNS=("bin/Release/net8.0/linux-arm64/native/*" "bin/Release/net8.0/linux-arm64/publish/*" "bin/Release/net8.0/linux-arm64/*")
-          FOUND=0
-          for p in "${PATTERNS[@]}"; do
-            if compgen -G "$p" > /dev/null; then
-              echo "Found files matching: $p"
-              FOUND=1
-            fi
-          done
-          if [ "$FOUND" -eq 0 ]; then
-            echo "::error::No native artifacts found under bin/Release/net8.0/linux-arm64"
-            echo "List entire tree for debugging:"
-            ls -Rlah || true
-            exit 1
-          fi
-
-      - name: Upload build artifacts
+      - name: Upload R36S binary
         uses: actions/upload-artifact@v4
         with:
-          name: r36s-linux-arm64-artifacts
-          path: |
-            bin/Release/net8.0/linux-arm64/**
-            build-arm64-complete.txt
-
-      - name: Quick verify presence (final)
-        run: |
-          if compgen -G "bin/Release/net8.0/linux-arm64/native/*" > /dev/null; then
-            echo "SUCCESS: native files present in bin/Release/net8.0/linux-arm64/native/"
-            ls -lh bin/Release/net8.0/linux-arm64/native || true
-          elif compgen -G "bin/Release/net8.0/linux-arm64/publish/*" > /dev/null; then
-            echo "SUCCESS: publish/ contains files"
-            ls -lh bin/Release/net8.0/linux-arm64/publish || true
-          else
-            echo "::warning::No native file found with expected paths. Check uploaded artifact 'r36s-linux-arm64-artifacts'."
-            ls -Rlah bin/Release/net8.0/linux-arm64 || true
-            exit 0
-          fi
+          name: R36S-glibc228
+          path: bin/Release/net8.0/linux-arm64/native/R36S
