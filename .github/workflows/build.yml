@@ -1,44 +1,48 @@
-name: Build R36S ARM64 (glibc compatible)
+name: Build R36S (linux-arm64, no docker)
 
 on:
   workflow_dispatch:
 
 jobs:
   build:
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - name: Enable ARM64
-        uses: docker/setup-qemu-action@v3
-
-      - name: Build in ARM64 Ubuntu 20.04
+      - name: Install dependencies
         run: |
-          docker run --rm --platform linux/arm64 \
-            -v "$PWD:/work" -w /work \
-            ubuntu:20.04 /bin/bash -lc "
-              set -e
-              apt update
-              apt install -y \
-                build-essential clang cmake git \
-                libgl1-mesa-dev libegl1-mesa-dev \
-                libdrm-dev libgbm-dev libudev-dev \
-                zlib1g-dev libx11-dev
+          sudo apt-get update
+          sudo apt-get install -y \
+            clang lld \
+            libc6-dev-arm64-cross \
+            gcc-aarch64-linux-gnu \
+            zlib1g-dev \
+            libssl-dev
 
-              # dotnet
-              curl -fsSL https://dot.net/v1/dotnet-install.sh | bash
-              export PATH=\$HOME/.dotnet:\$PATH
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
 
-              dotnet publish -c Release \
-                -r linux-arm64 \
-                --self-contained true \
-                /p:PublishAot=true \
-                /p:InvariantGlobalization=true
-            "
+      - name: Publish ARM64 ELF (no AOT)
+        run: |
+          dotnet publish \
+            -c Release \
+            -r linux-arm64 \
+            --self-contained true \
+            /p:PublishSingleFile=true \
+            /p:InvariantGlobalization=true
 
-      - name: Upload R36S binary
+      - name: Verify output
+        run: |
+          file bin/Release/net8.0/linux-arm64/R36S
+          ldd bin/Release/net8.0/linux-arm64/R36S || true
+
+      - name: Upload executable
         uses: actions/upload-artifact@v4
         with:
-          name: R36S-glibc228
-          path: bin/Release/net8.0/linux-arm64/native/R36S
+          name: R36S-ELF
+          path: bin/Release/net8.0/linux-arm64/R36S
