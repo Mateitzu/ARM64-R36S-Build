@@ -1,4 +1,4 @@
-name: Build R36S (linux-arm64, no docker)
+name: Build R36S (linux-arm64, self-contained singlefile)
 
 on:
   workflow_dispatch:
@@ -6,43 +6,78 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
 
     steps:
-      - name: Checkout
+      - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Install dependencies
+      - name: Install native deps (host)
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            clang lld \
-            libc6-dev-arm64-cross \
-            gcc-aarch64-linux-gnu \
-            zlib1g-dev \
-            libssl-dev
+          sudo apt-get update -y
+          # instalăm ce trebuie pentru publish (linker, zlib, etc.)
+          sudo apt-get install -y --no-install-recommends \
+            clang lld gcc-aarch64-linux-gnu libc6-dev-arm64-cross \
+            zlib1g-dev libssl-dev libunwind-dev pkg-config curl ca-certificates
 
-      - name: Setup .NET
+      - name: Setup .NET 8
         uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: 8.0.x
+          dotnet-version: '8.0.x'
 
-      - name: Publish ARM64 ELF (no AOT)
+      - name: Dotnet restore
+        run: dotnet restore
+
+      - name: dotnet clean
+        run: dotnet clean -c Release
+
+      - name: Publish (linux-arm64, single file, NO AOT)
         run: |
-          dotnet publish \
-            -c Release \
-            -r linux-arm64 \
-            --self-contained true \
+          # Forțăm PublishAot=false în linie de comandă pentru a evita conflictele
+          dotnet publish -c Release -r linux-arm64 --self-contained true \
             /p:PublishSingleFile=true \
-            /p:InvariantGlobalization=true
+            /p:PublishAot=false \
+            /p:InvariantGlobalization=true \
+            -v minimal
 
-      - name: Verify output
+      - name: Collect outputs and show info
         run: |
-          file bin/Release/net8.0/linux-arm64/R36S
-          ldd bin/Release/net8.0/linux-arm64/R36S || true
+          OUT=bin/Release/net8.0/linux-arm64
+          echo "Listing $OUT:"
+          if [ -d "$OUT" ]; then
+            ls -lah "$OUT"
+            file "$OUT"/* || true
+            echo "ldd (if available):"
+            ldd "$OUT"/* || true
+          else
+            echo "Output folder not found: $OUT"
+            exit 1
+          fi
 
-      - name: Upload executable
+      - name: Prepare artifacts folder
+        run: |
+          mkdir -p artifacts
+          OUT=bin/Release/net8.0/linux-arm64
+          # Copiem executabilul (nume R36S) - ajustează dacă numele e altul
+          if [ -f "$OUT/R36S" ]; then
+            cp "$OUT/R36S" artifacts/R36S
+            chmod +x artifacts/R36S
+          else
+            # Dacă publish a produs un single-file cu nume altul, încercăm să le copiem pe toate
+            cp -a $OUT/* artifacts/ || true
+          fi
+          # Dacă în repo ai libraylib.so (sau altă .so necesară), includem și ea
+          if [ -f "raylib/build/src/libraylib.so" ]; then
+            cp raylib/build/src/libraylib.so artifacts/ || true
+          fi
+          # creăm zip pentru ușurință
+          cd artifacts && zip -r ../R36S-artifact.zip . && cd ..
+
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: R36S-ELF
-          path: bin/Release/net8.0/linux-arm64/R36S
+          name: raylib-r36s-artifacts
+          path: |
+            artifacts/R36S
+            artifacts/*
+            R36S-artifact.zip
