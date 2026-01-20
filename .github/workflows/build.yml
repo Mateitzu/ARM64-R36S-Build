@@ -1,47 +1,117 @@
-name: Build ELF Linux ARM64 (R36S)
+name: Build .NET 8 NativeAOT (linux-arm64)
 
 on:
   workflow_dispatch:
 
 jobs:
-  build:
-    runs-on: ubuntu-22.04
-    timeout-minutes: 20
+  build-arm64:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
 
     steps:
-      - name: Checkout repo
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install .NET 8
-        uses: actions/setup-dotnet@v4
+      - name: Setup .NET 8
+        uses: actions/setup-dotnet@v3
         with:
-          dotnet-version: 8.0.x
+          dotnet-version: '8.0.x'
 
-      - name: Install NativeAOT deps
+      - name: Install native toolchain (clang + lld) and deps
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            clang \
-            lld \
-            zlib1g-dev
+          sudo apt-get update -y
+          # packages: clang (compiler), lld (linker), build-essential (make/gcc headers),
+          # libssl-dev/zlib1g-dev - common native deps, pkg-config for native lookups
+          sudo apt-get install -y --no-install-recommends \
+            clang lld build-essential ca-certificates curl wget \
+            pkg-config libssl-dev zlib1g-dev
+          sudo ln -sf /usr/bin/ld.lld /usr/bin/ld.lld || true
+          echo "=== versions ==="
+          clang --version || true
+          ld.lld --version || true
+          dotnet --info
 
+      - name: Restore NuGet packages
+        run: dotnet restore
 
-      - name: Publish NativeAOT (ELF ARM64)
+      - name: Publish NativeAOT for linux-arm64
+        # Force clang + lld usage via env. Use self-contained AOT publish.
+        env:
+          CC: clang
+          CXX: clang++
+          LD: ld.lld
         run: |
-          dotnet publish \
-            -c Release \
-            -r linux-arm64 \
+          set -euxo pipefail
+          # Clean previous outputs
+          dotnet clean -c Release || true
+          # Publish (self-contained, NativeAOT)
+          dotnet publish -c Release -r linux-arm64 \
             --self-contained true \
-            /p:PublishAot=true
+            /p:PublishAot=true /p:InvariantGlobalization=true \
+            -v minimal
 
-      - name: List output
+      - name: Locate native artifacts and copy to artifacts/
         run: |
-          ls -lah bin/Release/net8.0/linux-arm64/publish
+          set -euo pipefail
+          mkdir -p artifacts
+          echo "Searching for native/publish outputs..."
+          # Candidate folders (covers common outputs)
+          CANDIDATES=(
+            "bin/Release/net8.0/linux-arm64/native"
+            "bin/Release/net8.0/linux-arm64/publish"
+            "bin/Release/net8.0/linux-arm64"
+            "bin/Release/net8.0/publish"
+          )
+          FOUND=0
+          for d in "${CANDIDATES[@]}"; do
+            if [ -d "$d" ]; then
+              echo "== listing $d =="
+              ls -la "$d" || true
+              # copy executable files (executable bit set)
+              for f in "$d"/*; do
+                if [ -f "$f" ] && [ -x "$f" ]; then
+                  echo "Copying executable: $f"
+                  cp -v "$f" artifacts/ || true
+                  FOUND=1
+                fi
+              done
+              # also copy any *.so if present
+              for s in "$d"/*.so; do
+                [ -e "$s" ] && { echo "Copying shared lib: $s"; cp -v "$s" artifacts/ || true; FOUND=1; }
+              done
+            fi
+          done
 
-      - name: Upload ELF + .so
+          # If your project emits native executable in a subfolder (project name):
+          for f in bin/Release/net8.0/linux-arm64/*/*; do
+            if [ -f "$f" ] && [ -x "$f" ]; then
+              echo "Copying executable (subfolder): $f"
+              cp -v "$f" artifacts/ || true
+              FOUND=1
+            fi
+          done || true
+
+          # If you also build raylib separately and expect libraylib.so in repo (optional)
+          if [ -f "raylib/build/src/libraylib.so" ]; then
+            echo "Copying raylib/build/src/libraylib.so"
+            cp -v raylib/build/src/libraylib.so artifacts/ || true
+            FOUND=1
+          fi
+
+          if [ "$FOUND" -eq 0 ]; then
+            echo "ERROR: No native executables or .so found in standard locations."
+            echo "Workspace tree (root):"
+            ls -la || true
+            echo "Search full tree (this may be large):"
+            find . -maxdepth 4 -type f -exec file {} \; | sed -n '1,200p' || true
+            exit 1
+          fi
+
+          echo "Artifacts prepared:"
+          ls -la artifacts || true
+
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: R36S-build
-          path: |
-            bin/Release/net8.0/linux-arm64/publish/*
-            libraylib.so
+          name: arm64-native-artifacts
+          path: artifacts/
