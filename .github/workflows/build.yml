@@ -1,117 +1,96 @@
-name: Build .NET 8 NativeAOT (linux-arm64)
+name: Build R36S for linux-arm64 (AOT/native)
 
 on:
   workflow_dispatch:
 
 jobs:
-  build-arm64:
+  build-native-arm64:
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 60
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup .NET 8
-        uses: actions/setup-dotnet@v3
-        with:
-          dotnet-version: '8.0.x'
+      - name: Set up QEMU (multi-arch emulation)
+        uses: docker/setup-qemu-action@v3
 
-      - name: Install native toolchain (clang + lld) and deps
+      - name: Set up Docker Buildx (optional, for multi-arch)
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build (inside an ARM64 .NET SDK container)
+        # mount workspace into /work and run all build commands inside an arm64 container
         run: |
-          sudo apt-get update -y
-          # packages: clang (compiler), lld (linker), build-essential (make/gcc headers),
-          # libssl-dev/zlib1g-dev - common native deps, pkg-config for native lookups
-          sudo apt-get install -y --no-install-recommends \
-            clang lld build-essential ca-certificates curl wget \
-            pkg-config libssl-dev zlib1g-dev
-          sudo ln -sf /usr/bin/ld.lld /usr/bin/ld.lld || true
-          echo "=== versions ==="
-          clang --version || true
-          ld.lld --version || true
-          dotnet --info
+          docker run --rm --platform linux/arm64 \
+            -v "${{ github.workspace }}:/work" -w /work \
+            mcr.microsoft.com/dotnet/sdk:8.0 /bin/bash -lc "\
+              set -euo pipefail; \
+              echo 'Container info:'; uname -a; arch; dotnet --info || true; \
+              apt-get update -y; \
+              DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+                clang lld binutils-aarch64-linux-gnu ca-certificates wget pkg-config build-essential; \
+              echo 'Installed versions:'; clang --version; ld.lld --version || true; aarch64-linux-gnu-ld --version || true; \
+              echo 'Restore and publish (AOT)'; \
+              # optional: restore first (helps debug/see restore errors)
+              dotnet restore || (cat ~/.nuget/packages/*.log 2>/dev/null || true; false); \
+              # Publish AOT self-contained for linux-arm64
+              dotnet publish -c Release -r linux-arm64 --self-contained true /p:PublishAot=true /p:InvariantGlobalization=true -v minimal; \
+              echo 'Listing outputs (useful to find native binary / ELF)'; \
+              ls -lah bin/Release/net8.0/linux-arm64 || true; \
+              echo 'Find native/publish files:'; \
+              find bin/Release/net8.0/linux-arm64 -maxdepth 6 -type f -print || true; \
+              # create a small marker file so we can quickly check in Actions logs
+              echo 'BUILD_COMPLETE' > build-arm64-complete.txt; \
+            "
 
-      - name: Restore NuGet packages
-        run: dotnet restore
-
-      - name: Publish NativeAOT for linux-arm64
-        # Force clang + lld usage via env. Use self-contained AOT publish.
-        env:
-          CC: clang
-          CXX: clang++
-          LD: ld.lld
+      - name: Show produced files (host side)
         run: |
-          set -euxo pipefail
-          # Clean previous outputs
-          dotnet clean -c Release || true
-          # Publish (self-contained, NativeAOT)
-          dotnet publish -c Release -r linux-arm64 \
-            --self-contained true \
-            /p:PublishAot=true /p:InvariantGlobalization=true \
-            -v minimal
+          echo "=== Content of bin/Release/net8.0/linux-arm64 ==="
+          ls -Rlah bin/Release/net8.0/linux-arm64 || true
+          echo "=== Root workspace (top) ==="
+          ls -lah | sed -n '1,200p' || true
 
-      - name: Locate native artifacts and copy to artifacts/
+      - name: Fail early if no native artifacts found
         run: |
-          set -euo pipefail
-          mkdir -p artifacts
-          echo "Searching for native/publish outputs..."
-          # Candidate folders (covers common outputs)
-          CANDIDATES=(
-            "bin/Release/net8.0/linux-arm64/native"
-            "bin/Release/net8.0/linux-arm64/publish"
-            "bin/Release/net8.0/linux-arm64"
-            "bin/Release/net8.0/publish"
+          # Common places to look:
+          PATTERNS=(
+            "bin/Release/net8.0/linux-arm64/native/*"
+            "bin/Release/net8.0/linux-arm64/publish/*"
+            "bin/Release/net8.0/linux-arm64/*"
           )
           FOUND=0
-          for d in "${CANDIDATES[@]}"; do
-            if [ -d "$d" ]; then
-              echo "== listing $d =="
-              ls -la "$d" || true
-              # copy executable files (executable bit set)
-              for f in "$d"/*; do
-                if [ -f "$f" ] && [ -x "$f" ]; then
-                  echo "Copying executable: $f"
-                  cp -v "$f" artifacts/ || true
-                  FOUND=1
-                fi
-              done
-              # also copy any *.so if present
-              for s in "$d"/*.so; do
-                [ -e "$s" ] && { echo "Copying shared lib: $s"; cp -v "$s" artifacts/ || true; FOUND=1; }
-              done
-            fi
-          done
-
-          # If your project emits native executable in a subfolder (project name):
-          for f in bin/Release/net8.0/linux-arm64/*/*; do
-            if [ -f "$f" ] && [ -x "$f" ]; then
-              echo "Copying executable (subfolder): $f"
-              cp -v "$f" artifacts/ || true
+          for p in "${PATTERNS[@]}"; do
+            if compgen -G "$p" > /dev/null; then
+              echo "Found files matching: $p"
               FOUND=1
             fi
-          done || true
-
-          # If you also build raylib separately and expect libraylib.so in repo (optional)
-          if [ -f "raylib/build/src/libraylib.so" ]; then
-            echo "Copying raylib/build/src/libraylib.so"
-            cp -v raylib/build/src/libraylib.so artifacts/ || true
-            FOUND=1
-          fi
-
+          done
           if [ "$FOUND" -eq 0 ]; then
-            echo "ERROR: No native executables or .so found in standard locations."
-            echo "Workspace tree (root):"
-            ls -la || true
-            echo "Search full tree (this may be large):"
-            find . -maxdepth 4 -type f -exec file {} \; | sed -n '1,200p' || true
+            echo "::error::No native artifacts found under bin/Release/net8.0/linux-arm64"
+            echo "List entire tree (for debugging):"
+            ls -Rlah || true
             exit 1
           fi
 
-          echo "Artifacts prepared:"
-          ls -la artifacts || true
-
-      - name: Upload artifacts
+      - name: Upload ARM64 build artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: arm64-native-artifacts
-          path: artifacts/
+          name: r36s-linux-arm64-artifacts
+          # upload the whole build output dir so you can inspect logs + native binary + publish folder
+          path: |
+            bin/Release/net8.0/linux-arm64/**
+            build-arm64-complete.txt
+
+      - name: Quick verify (artifact presence)
+        run: |
+          if compgen -G "bin/Release/net8.0/linux-arm64/native/*" > /dev/null; then
+            echo "SUCCESS: native files present in bin/Release/net8.0/linux-arm64/native/"
+            ls -lh bin/Release/net8.0/linux-arm64/native || true
+          elif compgen -G "bin/Release/net8.0/linux-arm64/publish/*" > /dev/null; then
+            echo "SUCCESS: publish/ contains files"
+            ls -lh bin/Release/net8.0/linux-arm64/publish || true
+          else
+            echo "::warning::No native file found with expected paths. Check the uploaded artifact 'r36s-linux-arm64-artifacts' to inspect the build tree and logs."
+            ls -Rlah bin/Release/net8.0/linux-arm64 || true
+            exit 0
+          fi
