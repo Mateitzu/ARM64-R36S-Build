@@ -15,49 +15,42 @@ jobs:
       - name: Set up QEMU (multi-arch emulation)
         uses: docker/setup-qemu-action@v3
 
-      - name: Set up Docker Buildx (optional, for multi-arch)
+      - name: Set up Docker Buildx (optional)
         uses: docker/setup-buildx-action@v3
 
-      - name: Build (inside an ARM64 .NET SDK container)
-        # mount workspace into /work and run all build commands inside an arm64 container
+      - name: Build inside ARM64 .NET SDK container (install zlib + toolchain)
         run: |
           docker run --rm --platform linux/arm64 \
             -v "${{ github.workspace }}:/work" -w /work \
             mcr.microsoft.com/dotnet/sdk:8.0 /bin/bash -lc "\
               set -euo pipefail; \
-              echo 'Container info:'; uname -a; arch; dotnet --info || true; \
+              echo '=== container info ==='; uname -a; arch; dotnet --info || true; \
+              export DEBIAN_FRONTEND=noninteractive; \
               apt-get update -y; \
-              DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-                clang lld binutils-aarch64-linux-gnu ca-certificates wget pkg-config build-essential; \
-              echo 'Installed versions:'; clang --version; ld.lld --version || true; aarch64-linux-gnu-ld --version || true; \
-              echo 'Restore and publish (AOT)'; \
-              # optional: restore first (helps debug/see restore errors)
-              dotnet restore || (cat ~/.nuget/packages/*.log 2>/dev/null || true; false); \
-              # Publish AOT self-contained for linux-arm64
+              apt-get install -y --no-install-recommends \
+                clang lld binutils-aarch64-linux-gnu build-essential pkg-config wget ca-certificates \
+                zlib1g-dev libssl-dev libunwind-dev; \
+              echo '=== tool versions ==='; clang --version || true; aarch64-linux-gnu-ld --version || true; ld.bfd --version || true; \
+              echo '=== dotnet restore ==='; \
+              dotnet restore || (echo 'dotnet restore failed' >&2; false); \
+              echo '=== dotnet publish (AOT) ==='; \
               dotnet publish -c Release -r linux-arm64 --self-contained true /p:PublishAot=true /p:InvariantGlobalization=true -v minimal; \
-              echo 'Listing outputs (useful to find native binary / ELF)'; \
+              echo '=== list outputs ==='; \
               ls -lah bin/Release/net8.0/linux-arm64 || true; \
-              echo 'Find native/publish files:'; \
               find bin/Release/net8.0/linux-arm64 -maxdepth 6 -type f -print || true; \
-              # create a small marker file so we can quickly check in Actions logs
-              echo 'BUILD_COMPLETE' > build-arm64-complete.txt; \
+              echo BUILD_COMPLETE > build-arm64-complete.txt; \
             "
 
-      - name: Show produced files (host side)
+      - name: Show produced files (host)
         run: |
-          echo "=== Content of bin/Release/net8.0/linux-arm64 ==="
+          echo "=== bin tree ==="
           ls -Rlah bin/Release/net8.0/linux-arm64 || true
-          echo "=== Root workspace (top) ==="
+          echo "=== workspace top ==="
           ls -lah | sed -n '1,200p' || true
 
-      - name: Fail early if no native artifacts found
+      - name: Fail if no native artifacts found (helpful debug)
         run: |
-          # Common places to look:
-          PATTERNS=(
-            "bin/Release/net8.0/linux-arm64/native/*"
-            "bin/Release/net8.0/linux-arm64/publish/*"
-            "bin/Release/net8.0/linux-arm64/*"
-          )
+          PATTERNS=("bin/Release/net8.0/linux-arm64/native/*" "bin/Release/net8.0/linux-arm64/publish/*" "bin/Release/net8.0/linux-arm64/*")
           FOUND=0
           for p in "${PATTERNS[@]}"; do
             if compgen -G "$p" > /dev/null; then
@@ -67,21 +60,20 @@ jobs:
           done
           if [ "$FOUND" -eq 0 ]; then
             echo "::error::No native artifacts found under bin/Release/net8.0/linux-arm64"
-            echo "List entire tree (for debugging):"
+            echo "List entire tree for debugging:"
             ls -Rlah || true
             exit 1
           fi
 
-      - name: Upload ARM64 build artifacts
+      - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
           name: r36s-linux-arm64-artifacts
-          # upload the whole build output dir so you can inspect logs + native binary + publish folder
           path: |
             bin/Release/net8.0/linux-arm64/**
             build-arm64-complete.txt
 
-      - name: Quick verify (artifact presence)
+      - name: Quick verify presence (final)
         run: |
           if compgen -G "bin/Release/net8.0/linux-arm64/native/*" > /dev/null; then
             echo "SUCCESS: native files present in bin/Release/net8.0/linux-arm64/native/"
@@ -90,7 +82,7 @@ jobs:
             echo "SUCCESS: publish/ contains files"
             ls -lh bin/Release/net8.0/linux-arm64/publish || true
           else
-            echo "::warning::No native file found with expected paths. Check the uploaded artifact 'r36s-linux-arm64-artifacts' to inspect the build tree and logs."
+            echo "::warning::No native file found with expected paths. Check uploaded artifact 'r36s-linux-arm64-artifacts'."
             ls -Rlah bin/Release/net8.0/linux-arm64 || true
             exit 0
           fi
